@@ -1,0 +1,14 @@
+FC=pgf90
+FFLAGS=-O3 -acc -Minfo=accel -mp -Mpreprocess -DGPU
+LIBS=
+OBJ=ccc_direct_kernel.o
+TARGET=ccc_direct_kernel_openacc
+
+%.o: %.f
+	$(FC) $(FFLAGS) -c -o $@ $<
+
+$(TARGET): $(OBJ)
+	$(FC) $(FFLAGS) $(LIBS) -o $@ $^
+
+clean:
+	rm -f $(TARGET) *.o
