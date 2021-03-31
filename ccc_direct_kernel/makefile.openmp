@@ -1,0 +1,14 @@
+FC=gfortran
+FFLAGS=-O2 -fopenmp -DGPU -cpp
+LIBS=
+OBJ=ccc_direct_kernel_openmp.o
+TARGET=ccc_direct_kernel_openmp
+
+%.o: %.f
+	$(FC) $(FFLAGS) -c -o $@ $<
+
+$(TARGET): $(OBJ)
+	$(FC) $(FFLAGS) $(LIBS) -o $@ $^
+
+clean:
+	rm -f $(TARGET) *.o

@@ -1,12 +1,12 @@
       program ccc_direct_kernel
-#ifdef GPU
-      use openacc
-#endif
+      use omp_lib
       integer nchi,nchtop,nqmi,nqmf,maxi,maxi2
       integer nchf,ki,i,j,k
       integer nqmfmax
       integer kff,kii
+      double precision dotp1,dotp2
       integer gpunum,tnum,ngpus
+      integer num_devices
       parameter kmax = 601
       parameter meshr = 15510
 
@@ -15,13 +15,16 @@
      >                  ,chitemp(:,:),vmatt(:,:,:,:)
       double precision, allocatable :: temp3(:,:),temp2(:,:,:),tmp(:,:)
 
-      integer, external :: omp_get_thread_num,omp_get_max_threads
+!      integer, external :: omp_get_thread_num,omp_get_max_threads,
+!     >                     omp_get_num_devices
 
-      real :: start, finish   
+      double precision start, finish   
 
 #ifdef GPU
 C     set number of gpus on the node
-      ngpus=max(1,acc_get_num_devices(acc_device_nvidia))
+      num_devices=omp_get_num_devices()
+      ngpus=max(1,num_devices)
+      write(*,*) num_devices
 #endif
 #ifdef _OPENMP
 C     set number of threads
@@ -72,82 +75,72 @@ C     for accelerator we can assume that chil and npk have been
 C     copied to the device earlier
 #ifdef GPU
       do gpunum=0,ngpus-1
-         call acc_set_device_num(gpunum,acc_device_nvidia)
-!$acc enter data copyin(chil(1:meshr,1:(npk(nchtop+1)-1)))
-!$acc& copyin(npk(1:nchtop+1))
+!         call omp_set_default_device(gpunum)
+!         call acc_set_device_num(gpunum,acc_device_nvidia)
+!$omp target enter data device(gpunum)
+!$omp& map(to:chil(1:meshr,1:(npk(nchtop+1)-1)),npk(1:nchtop+1))
       enddo
 #endif
 
-      call cpu_time(start)
+!      call cpu_time(start)
+      start = omp_get_wtime()
 
 #ifdef GPU
-!$omp parallel num_threads(ngpus)
+!!$omp parallel num_threads(ngpus)
 #else
 !$omp parallel num_threads(nnt)
 #endif
-!$omp& private(gpunum,nchf,nqmf,chitemp,ki,kf,i,kff,kii,tmp,tnum)
-!$omp& shared(nchi,nchtop,npk,maxtemp3,temp3,chil,vmatt,ngpus)
-!$omp& shared(nqmi,maxi,maxi2,temp2)
+!!$omp& private(gpunum,nchf,nqmf,chitemp,ki,kf,i,kff,kii,tmp,tnum)
+!!$omp& shared(nchi,nchtop,npk,maxtemp3,temp3,chil,vmatt,ngpus)
+!!$omp& shared(nqmi,maxi,maxi2,temp2)
 
 #ifdef GPU
       tnum=omp_get_thread_num()
       gpunum=mod(tnum,ngpus)
-      call acc_set_device_num(gpunum,acc_device_nvidia)
+      call omp_set_default_device(gpunum)
 #endif
 
-!$acc data
-!$acc& copyin(vmatt(1:nqmfmax,1:nqmi,nchi:nchtop,0:1))
-!$acc& present(npk(1:nchtop+1))
-!$acc& present(chil(1:meshr,1:(npk(nchtop+1)-1)))
-!$acc& copyin(nqmi,temp3(1:meshr,nchi:nchtop))
-!$acc& create(chitemp)
-!$acc& create(temp2)
-!$acc& create(tmp)
-!$omp do 
-!schedule(dynamic)
+!!$omp target enter data map(to:vmatt(1:nqmfmax,1:nqmi,nchi:nchtop,0:1),
+!!$omp& temp3(1:meshr,nchi:nchtop),
+!!$omp& temp2(1:maxi2,1:nqmi,nchi:nchtop))
+!!$omp& map(alloc:chitemp(1:maxi,1:nqmi))
+
+!$omp target enter data map(to:vmatt,temp3,temp2)
       do nchf = nchi, nchtop
          nqmf = npk(nchf+1) - npk(nchf)
-!$acc update device(temp2(1:maxi2,1:nqmi,nchf)) async(1)
-!$acc kernels 
-!$acc loop independent collapse(2)
-         do ki = 1, nqmi
-            do i = 1, maxi !minki, maxi
-               chitemp(i,ki) = temp3(i,nchf) * chil(i,ki+npk(nchi)-1)
-            enddo
-         enddo
-!$acc wait(1)
-!$acc loop independent collapse(2)
+
+!$omp target teams distribute parallel do collapse(2)
          do ki = 1, nqmi
             do kf = 1, nqmf
-               kff = npk(nchf) + kf -1
-               tmp(ki,kf) = dot_product(chil(1:maxi2,kff),
-     >                      temp2(1:maxi2,ki,nchf))
-            enddo
-         enddo
-!$acc loop independent collapse(2)
-         do ki = 1, nqmi
-            do kf=1,nqmf
                kii = npk(nchi) + ki - 1
-               kff = npk(nchf) + kf - 1
-               vmatt(kf,ki,nchf,0)=vmatt(kf,ki,nchf,0)+dot_product(
-     >                 chil(1:maxi,kff),
-     >                 chitemp(1:maxi,ki))+tmp(ki,kf)
-               vmatt(kf,ki,nchf,1)=vmatt(kf,ki,nchf,0)-2*tmp(ki,kf)
+               kff = npk(nchf) + kf -1
+               dotp1=0
+               dotp2=0
+!$omp simd reduction(+:dotp2)
+               do kd=1,maxi
+                  dotp2=dotp2+chil(kd,kff)*chil(kd,ki+npk(nchi)-1)
+     >                 *temp3(kd,nchf) 
+               end do
+!$omp simd reduction(+:dotp1)
+               do kd = 1,maxi2
+                 dotp1=dotp1+chil(kd,kff)*temp2(kd,ki,nchf)
+               end do
+               vmatt(kf,ki,nchf,0)=vmatt(kf,ki,nchf,0)+dotp2+dotp1
+               vmatt(kf,ki,nchf,1)=vmatt(kf,ki,nchf,0)-2*dotp1
             end do
          end do
-!$acc end kernels
+!$omp end target teams distribute parallel do
 !$acc update self(vmatt(1:nqmf,1:nqmi,nchf,0:1)) async
        end do
-!$omp end do
+!!$omp end do
 
-!$acc wait
+!$omp target exit data map(from:vmatt)
 
-!$acc end data
-!$omp end parallel
-
-      call cpu_time(finish)
+!      call cpu_time(finish)
+      finish = omp_get_wtime()
   
-      print '("Kernel time: ",f6.3," seconds.")',finish-start
+      print '("Kernel time: ",f10.5," seconds.")',finish-start
+
       write(*,*) vmatt(1,1,1,1)
 
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
@@ -156,7 +149,11 @@ CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
 
 #ifdef GPU
       do gpunum=0,ngpus-1
-         call acc_set_device_num(gpunum,acc_device_nvidia)
+!         call acc_set_device_num(gpunum,acc_device_nvidia)
+!         call omp_set_default_device(gpunum)
+!$omp target exit data device(gpunum) map(delete:chil,npk)
+!!map(delete:chil(1:meshr,1:(npk(nchtop+1)-1)),
+!!$omp& npk(1:nchtop+1))
 !$acc exit data delete(chil,npk)
       end do
 #endif
